@@ -61,6 +61,15 @@ var SCH                 = "";
 var TOL                 = 0.011;
 var DESC_TOTAL_LINHA    = true;
 
+// "Desconto total por item" no Rodape > Totais e COLUNA GRAVADA no TGFCAB
+// (VLRDESCTOTITEM), nao calculo de exibicao. Como nada recalcula, o script
+// tem de grava-la, senao ela fica com o valor antigo do TemApi - visto no
+// 202443: itens com VLRDESC 0 e o rodape ainda mostrando 260,90.
+// VLRDESCTOTITEMMOE e a versao em moeda; em pedido em real espelha a outra.
+var GRAVAR_DESCTOTITEM  = true;
+var CAMPO_DESCITEM      = "VLRDESCTOTITEM";
+var CAMPO_DESCITEM_MOE  = "VLRDESCTOTITEMMOE";
+
 var KP_TABLE = [
   { sku: 2310, nome: 'KP1',  vl:  29.90, min:   74.75, max:  200.00 },
   { sku: 2311, nome: 'KP3',  vl:  89.70, min:  200.00, max:  448.50 },
@@ -169,6 +178,12 @@ function lerCabecalho(nunota) {
     c.OBSINT_OK   = false;
     try { c.OBSINT = String(vo.asString(CAMPO_OBS_INTERNA)); c.OBSINT_OK = true; }
     catch (e) { c.OBSINT = "(ilegivel)"; }
+    c.DESCITEM_OK = false;
+    try { c.DESCITEM = Number(vo.asBigDecimalOrZero(CAMPO_DESCITEM)); c.DESCITEM_OK = true; }
+    catch (e) { c.DESCITEM = null; }
+    c.DESCITEMMOE_OK = false;
+    try { c.DESCITEMMOE = Number(vo.asBigDecimalOrZero(CAMPO_DESCITEM_MOE)); c.DESCITEMMOE_OK = true; }
+    catch (e) { c.DESCITEMMOE = null; }
     return c;
 }
 
@@ -426,6 +441,15 @@ function calcular(cab, itens) {
         vn += D.novos[w].der.fecha;      // ja liquido do desconto de arredondamento
     }
     D.vlrnotaAlvo = (vn === null) ? null : round2(vn + kpVl + cab.VLRFRETE);
+
+    // soma dos descontos dos itens no estado novo (a linha de KP entra com 0):
+    // e o que o campo "Desconto total por item" do rodape deve mostrar
+    var sd = 0, sdOk = true;
+    for (var y = 0; y < D.novos.length; y++) {
+        if (D.novos[y].der === null) { sdOk = false; break; }
+        sd += D.novos[y].der.vlrdesc;
+    }
+    D.descItemAlvo = sdOk ? round2(sd) : null;
     return D;
 }
 
@@ -523,6 +547,13 @@ function relatorio(cab, D, nunota) {
     rel.push("  Obs. Interna ...... " + cab.OBSINT + "  ->  " + obsAcao);
     rel.push("  Descontos rodape .. " + f2(cab.VLRDESCTOT) + " / " + f2(cab.PERCDESC) +
              "  ->  0.00 / 0.00");
+    if (GRAVAR_DESCTOTITEM && cab.DESCITEM_OK) {
+        rel.push("  Desc. total item .. " + f2(cab.DESCITEM) + "  ->  " +
+                 (D.descItemAlvo === null ? "(indefinido)" : f2(D.descItemAlvo)) +
+                 "   (soma dos descontos dos itens)");
+    } else if (GRAVAR_DESCTOTITEM) {
+        rel.push("  Desc. total item .. (campo " + CAMPO_DESCITEM + " ilegivel)");
+    }
     rel.push("  Qtd. volumes ...... " + cab.QTDVOL + "  ->  " + D.qtdVol);
     rel.push("  Vlr. Nota ......... " + f2(cab.VLRNOTA) + "  ->  " +
              (D.vlrnotaAlvo === null ? "(indefinido)" : f2(D.vlrnotaAlvo)) +
@@ -682,6 +713,11 @@ function gravarCabecalho(cab, D, nunota) {
     if (D.vlrnotaAlvo !== null && (GRAVAR_ITENS || GRAVAR_KP)) {
         reg.setCampo("VLRNOTA", bd(f2(D.vlrnotaAlvo)));
     }
+    // agregado do rodape: nada recalcula, entao tem de ser gravado
+    if (GRAVAR_DESCTOTITEM && (GRAVAR_ITENS || GRAVAR_KP) && D.descItemAlvo !== null) {
+        if (cab.DESCITEM_OK)    reg.setCampo(CAMPO_DESCITEM, bd(f2(D.descItemAlvo)));
+        if (cab.DESCITEMMOE_OK) reg.setCampo(CAMPO_DESCITEM_MOE, bd(f2(D.descItemAlvo)));
+    }
     var podeObs = cab.OBSINT_OK &&
                   !(PRESERVAR_OBS_INTERNA && String(cab.OBSINT) !== "null" &&
                     String(cab.OBSINT) !== "");
@@ -696,7 +732,10 @@ function gravarCabecalho(cab, D, nunota) {
     feitos.push("cabecalho: datas, centro, observacao, descontos zerados, volumes " +
                 D.qtdVol + (podeObs ? ", obs. interna" : ", obs. interna PRESERVADA") +
                 (D.vlrnotaAlvo !== null && (GRAVAR_ITENS || GRAVAR_KP)
-                 ? ", VLRNOTA " + f2(D.vlrnotaAlvo) : ""));
+                 ? ", VLRNOTA " + f2(D.vlrnotaAlvo) : "") +
+                (GRAVAR_DESCTOTITEM && cab.DESCITEM_OK && D.descItemAlvo !== null &&
+                 (GRAVAR_ITENS || GRAVAR_KP)
+                 ? ", desc. total por item " + f2(D.descItemAlvo) : ""));
 }
 
 
@@ -758,6 +797,15 @@ function verificar(D, nunota) {
         if (Math.abs(s - D.totalVenda) >= 0.005) {
             f.push("soma dos itens " + f2(s) + " != venda " + f2(D.totalVenda) +
                    " (diferenca de " + f2(s - D.totalVenda) + ")");
+        }
+        if (GRAVAR_CABECALHO && GRAVAR_DESCTOTITEM && c2.DESCITEM_OK &&
+            D.descItemAlvo !== null) {
+            if (Math.abs(c2.DESCITEM - D.descItemAlvo) >= 0.005) {
+                f.push(CAMPO_DESCITEM + " " + f2(c2.DESCITEM) + " != soma dos " +
+                       "descontos dos itens " + f2(D.descItemAlvo));
+            } else {
+                rel.push("  desc. total por item: " + f2(c2.DESCITEM) + " (ok)");
+            }
         }
         if (GRAVAR_CABECALHO) {
             var alvoNota = round2(D.totalVenda + c2.VLRFRETE);
