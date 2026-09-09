@@ -47,7 +47,21 @@ var GRAVAR_CABECALHO = false;
 var GRAVAR_ITENS     = false;
 var GRAVAR_KP        = false;
 
-var PIX_HABILITADO      = false;
+// ---- regra de Pix, por canal de marketplace ----
+// O desconto Pix chega em Rodape > Totais (VLRDESCTOT / PERCDESC).
+// Confirmado: Shopee -> o Pix ENTRA na base do calculo e o campo e zerado.
+//             Mercado Livre -> apenas zerar o campo, sem absorver.
+// Canal lido de TGFCAB.AD_CANAL_MKTPLACE. Os pedidos que interessam vem em
+// CAIXA ALTA: 'SHOPEE' e 'MERCADO_LIVRE'. Existem variacoes sujas no banco
+// (SHPS, MELI, "mercado livre", nulo) que caem em NAO RECONHECIDO.
+var PIX_HABILITADO      = true;
+var CAMPO_CANAL         = "AD_CANAL_MKTPLACE";
+var CANAL_ABSORVE_PIX   = "SHOPEE";          // Pix entra na base
+var CANAL_SO_ZERA       = "MERCADO_LIVRE";   // Pix apenas zerado
+// Canal nao reconhecido COM desconto no rodape: true = recusa o pedido.
+// Nao adivinha a regra, manda para a mao. Sao pouquissimos casos: em 7.454
+// pedidos Shopee apenas 4 tem desconto no rodape.
+var RECUSAR_CANAL_DESCONHECIDO = true;
 var CODCENCUS_ALVO      = 20000000;
 var CODTIPOPER_ESPERADO = 1755;
 var CAMPO_OBS_INTERNA   = "AD_INTERNAOBS";
@@ -178,6 +192,10 @@ function lerCabecalho(nunota) {
     c.OBSINT_OK   = false;
     try { c.OBSINT = String(vo.asString(CAMPO_OBS_INTERNA)); c.OBSINT_OK = true; }
     catch (e) { c.OBSINT = "(ilegivel)"; }
+    c.CANAL_OK = false;
+    try { c.CANAL = String(vo.asString(CAMPO_CANAL)); c.CANAL_OK = true; }
+    catch (e) { c.CANAL = null; }
+    if (c.CANAL === null || c.CANAL === "null") c.CANAL = "";
     c.DESCITEM_OK = false;
     try { c.DESCITEM = Number(vo.asBigDecimalOrZero(CAMPO_DESCITEM)); c.DESCITEM_OK = true; }
     catch (e) { c.DESCITEM = null; }
@@ -315,6 +333,57 @@ function derivar(cal, alvoLinha, qtd, aliqipi, aliqicms) {
 }
 
 
+// ---------- regra de Pix por canal ----------
+
+// Devolve { pix, origem, erro }.
+// pix e o valor a ABSORVER na base. Zero significa que o desconto do rodape
+// sera apenas zerado, sem entrar na conta.
+function decidirPix(cab) {
+    var temDesc = (cab.VLRDESCTOT !== 0 || cab.PERCDESC !== 0);
+
+    if (!PIX_HABILITADO) {
+        if (temDesc) {
+            return { pix: 0, origem: "regra DESLIGADA",
+                     erro: "Pedido tem desconto no rodape (Vlr " + f2(cab.VLRDESCTOT) +
+                           " / Perc " + f2(cab.PERCDESC) + ") e PIX_HABILITADO = false. " +
+                           "Zerar sem absorver reduziria o pedido. Tratar a mao." };
+        }
+        return { pix: 0, origem: "regra desligada; sem desconto no rodape", erro: null };
+    }
+
+    if (!temDesc) {
+        return { pix: 0, origem: "sem desconto no rodape (canal " +
+                                 (cab.CANAL === "" ? "-" : cab.CANAL) + ")", erro: null };
+    }
+
+    // valor do desconto: absoluto, ou percentual sobre a venda
+    var valor = (cab.VLRDESCTOT !== 0)
+              ? round2(cab.VLRDESCTOT)
+              : null;   // percentual resolvido depois, precisa da venda
+
+    if (cab.CANAL === CANAL_ABSORVE_PIX) {
+        return { pix: valor, percentual: (valor === null ? cab.PERCDESC : 0),
+                 origem: CANAL_ABSORVE_PIX + ": Pix entra na base", erro: null };
+    }
+    if (cab.CANAL === CANAL_SO_ZERA) {
+        return { pix: 0, origem: CANAL_SO_ZERA + ": desconto apenas zerado, " +
+                                "nao absorvido (valor do pedido sobe " +
+                                f2(cab.VLRDESCTOT) + ")", erro: null };
+    }
+
+    // canal nao reconhecido
+    if (RECUSAR_CANAL_DESCONHECIDO) {
+        return { pix: 0, origem: "canal NAO RECONHECIDO",
+                 erro: "Canal '" + (cab.CANAL === "" ? "(vazio)" : cab.CANAL) +
+                       "' nao reconhecido e o pedido tem desconto no rodape (Vlr " +
+                       f2(cab.VLRDESCTOT) + " / Perc " + f2(cab.PERCDESC) + "). " +
+                       "A regra de Pix so esta definida para " + CANAL_ABSORVE_PIX +
+                       " e " + CANAL_SO_ZERA + ". Tratar a mao." };
+    }
+    return { pix: 0, origem: "canal nao reconhecido; desconto apenas zerado", erro: null };
+}
+
+
 // ---------- calculo do valor (nucleo de 43 testes) ----------
 
 function faixaKp(total) {
@@ -378,13 +447,29 @@ function calcular(cab, itens) {
     }
     var kpVl = D.kp ? D.kp.vl : 0;
 
-    // alvo bruto de cada linha: venda da linha menos a parte proporcional do KP
-    var alvoTotal = round2(D.totalVenda - kpVl);
+    // ---- Pix ----
+    var dpix = decidirPix(cab);
+    D.pix = dpix.pix;
+    if (D.pix === null) {                       // desconto veio como percentual
+        D.pix = round2(D.totalVenda * cab.PERCDESC / 100);
+        dpix.origem = dpix.origem + " (percentual " + f2(cab.PERCDESC) +
+                      "% sobre " + f2(D.totalVenda) + ")";
+    }
+    D.pixOrigem = dpix.origem;
+    if (D.pix > 0) {
+        avisos.push("Pix de " + f2(D.pix) + " absorvido nos itens. ATENCAO: o campo " +
+                    "Vlr. do desdobramento (Rodape > Financeiro) pode nao acompanhar " +
+                    "e impedir a confirmacao - bug conhecido.");
+    }
+
+    // alvo bruto de cada linha: venda menos o Pix menos a parte do KP
+    D.brutoAlvo = round2(D.totalVenda - D.pix);
+    var alvoTotal = round2(D.brutoAlvo - kpVl);
     var alvos = [], somaAlvos = 0;
     for (var n = 0; n < D.produtos.length; n++) {
         var q0 = D.produtos[n];
         var prop = D.totalVenda > 0 ? (q0._vendaLinha / D.totalVenda) : (1 / D.produtos.length);
-        var a = round2(q0._vendaLinha - kpVl * prop);
+        var a = round2(q0._vendaLinha - (kpVl + D.pix) * prop);
         alvos.push(a);
         somaAlvos += a;
     }
@@ -460,10 +545,8 @@ function validar(cab, itens) {
     if (cab.CODTIPOPER !== CODTIPOPER_ESPERADO) {
         erros.push("TOP " + cab.CODTIPOPER + ", esperado " + CODTIPOPER_ESPERADO + ".");
     }
-    if (!PIX_HABILITADO && (cab.VLRDESCTOT !== 0 || cab.PERCDESC !== 0)) {
-        erros.push("Desconto no rodape (Vlr " + f2(cab.VLRDESCTOT) + " / Perc " +
-                   f2(cab.PERCDESC) + ") com a regra de Pix DESLIGADA. Tratar a mao.");
-    }
+    var dp = decidirPix(cab);
+    if (dp.erro !== null) erros.push(dp.erro);
     // VLRNOTA atual deve reproduzir a soma dos itens: se nao, o pedido ja
     // esta inconsistente e nao da para confiar em nada.
     var s = 0;
@@ -491,7 +574,11 @@ function relatorio(cab, D, nunota) {
     rel.push("  Soma produtos " + f2(D.somaProdutos) +
              (D.kpDevolvido > 0 ? "  + KP devolvido " + f2(D.kpDevolvido) : "") +
              "  =  TOTAL " + f2(D.totalVenda));
+    rel.push("  Canal ....... " + (cab.CANAL === "" ? "(vazio)" : cab.CANAL) +
+             (cab.CANAL_OK ? "" : "   [campo ilegivel]"));
+    rel.push("  Pix ......... " + f2(D.pix) + "   [" + D.pixOrigem + "]");
     rel.push("  KP da faixa: " + (D.kp ? D.kp.nome + " = " + f2(D.kp.vl) : "nenhum"));
+    rel.push("  BRUTO ALVO (itens + KP): " + f2(D.brutoAlvo));
 
     box("ITENS - CALIBRACAO E VALORES NOVOS");
     for (var i = 0; i < D.novos.length; i++) {
@@ -558,6 +645,7 @@ function relatorio(cab, D, nunota) {
     rel.push("  Vlr. Nota ......... " + f2(cab.VLRNOTA) + "  ->  " +
              (D.vlrnotaAlvo === null ? "(indefinido)" : f2(D.vlrnotaAlvo)) +
              "   (venda " + f2(D.totalVenda) +
+             (D.pix > 0 ? " - Pix " + f2(D.pix) : "") +
              (cab.VLRFRETE !== 0 ? " + frete " + f2(cab.VLRFRETE) : "") + ")");
     var tf;
     if (cab.VLRFRETE === 0 && TIPFRETE_EXTRANOTA !== null) {
@@ -789,14 +877,16 @@ function verificar(D, nunota) {
             s += it2[i].vlrtot + it2[i].vlripi - it2[i].vlrdesc;
         }
         s = round2(s);
-        rel.push("  soma dos itens: " + f2(s) + "   (venda alvo " + f2(D.totalVenda) + ")");
+        rel.push("  soma dos itens: " + f2(s) + "   (alvo " + f2(D.brutoAlvo) +
+                 " = venda " + f2(D.totalVenda) +
+                 (D.pix > 0 ? " - Pix " + f2(D.pix) : "") + ")");
         rel.push("  frete: " + f2(c2.VLRFRETE) + "   VLRNOTA: " + f2(c2.VLRNOTA) +
-                 "   (alvo " + f2(round2(D.totalVenda + c2.VLRFRETE)) + ")");
+                 "   (alvo " + f2(round2(D.brutoAlvo + c2.VLRFRETE)) + ")");
         // fechamento EXATO: com o desconto de arredondamento nao ha motivo para
         // sobrar centavo. Tolerancia de 1,1 centavo aqui deixaria passar erro.
-        if (Math.abs(s - D.totalVenda) >= 0.005) {
-            f.push("soma dos itens " + f2(s) + " != venda " + f2(D.totalVenda) +
-                   " (diferenca de " + f2(s - D.totalVenda) + ")");
+        if (Math.abs(s - D.brutoAlvo) >= 0.005) {
+            f.push("soma dos itens " + f2(s) + " != alvo " + f2(D.brutoAlvo) +
+                   " (diferenca de " + f2(s - D.brutoAlvo) + ")");
         }
         if (GRAVAR_CABECALHO && GRAVAR_DESCTOTITEM && c2.DESCITEM_OK &&
             D.descItemAlvo !== null) {
@@ -808,9 +898,9 @@ function verificar(D, nunota) {
             }
         }
         if (GRAVAR_CABECALHO) {
-            var alvoNota = round2(D.totalVenda + c2.VLRFRETE);
+            var alvoNota = round2(D.brutoAlvo + c2.VLRFRETE);
             if (Math.abs(c2.VLRNOTA - alvoNota) >= 0.005) {
-                f.push("VLRNOTA " + f2(c2.VLRNOTA) + " != venda + frete " + f2(alvoNota));
+                f.push("VLRNOTA " + f2(c2.VLRNOTA) + " != alvo + frete " + f2(alvoNota));
             }
         }
     }
@@ -832,7 +922,7 @@ function main() {
         rel.push("Chaves: CABECALHO=" + GRAVAR_CABECALHO + " ITENS=" + GRAVAR_ITENS +
                  " KP=" + GRAVAR_KP);
     }
-    rel.push("Pix: " + (PIX_HABILITADO ? "ATIVA" : "DESLIGADA"));
+    rel.push("Regra de Pix: " + (PIX_HABILITADO ? "ATIVA" : "DESLIGADA"));
     rel.push("Pedido: " + nunota + "   |   " + new Date());
 
     var cab = lerCabecalho(nunota);
