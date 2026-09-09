@@ -341,11 +341,29 @@ alterados enquanto os itens foram desfeitos. Indício de que
 `Registro.save()` confirma separadamente do Jape. Correção pendente: verificar
 os itens **antes** de encostar no cabeçalho, em vez de verificar tudo no fim.
 
-**Desconto Pix desligado.** Pedido com desconto no rodapé é recusado. Ao
-religar (`PIX_HABILITADO = true`), atenção: a faixa de KP é decidida sobre a
-venda antes do Pix, e essa informação desaparece quando o campo é zerado — se
-o Pix cruzar uma fronteira de faixa, uma segunda execução pode escolher faixa
-menor.
+**Desconto Pix — regra por canal, ativa.** O Pix chega em Rodapé → Totais
+(`VLRDESCTOT` / `PERCDESC`). O canal é lido de `TGFCAB.AD_CANAL_MKTPLACE`:
+
+| Canal | Desconto no rodapé | Ação |
+|---|---|---|
+| `SHOPEE` | > 0 | **absorve** o Pix na base e zera o campo |
+| `MERCADO_LIVRE` | > 0 | apenas zera o campo (o valor do pedido sobe) |
+| não reconhecido | > 0 | **recusa** (`RECUSAR_CANAL_DESCONHECIDO = true`) |
+| qualquer | 0 | segue normal |
+
+Só `'SHOPEE'` e `'MERCADO_LIVRE'` em caixa alta são reconhecidos. O banco tem
+variações sujas (`SHPS`, `MELI`, `mercado livre`, nulo) que caem em não
+reconhecido — nenhuma delas tem desconto no rodapé hoje.
+
+Ocorrência: 4 pedidos em 7.454 na Shopee, 27 em 6.954 no Mercado Livre.
+
+Ressalva de reexecução: a faixa de KP é decidida sobre a venda **antes** do
+Pix, e essa informação desaparece quando o campo é zerado. Se o Pix cruzar uma
+fronteira de faixa, uma segunda execução pode escolher faixa menor.
+
+**Pix agrava o bug do financeiro.** Com o Pix absorvido nos itens, o campo
+`Vlr. do desdobramento` (Rodapé → Financeiro) provavelmente não acompanha, o
+que impede a confirmação. O script emite aviso quando o Pix é maior que zero.
 
 **`TIPFRETE` Incluso não confirmado.** `TIPFRETE_INCLUSO = null`, então pedido
 com frete não tem o campo alterado. Falta abrir um pedido com `TIPFRETE = 'S'`
