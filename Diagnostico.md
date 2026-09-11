@@ -138,8 +138,12 @@ DEPOIS:  VLRUNIT 100.00  VLRTOT 375.49  BASEIPI 375.49  VLRIPI 24.41  BASEICMS 1
 Comparação campo a campo de um export de 51 colunas antes e depois: **só o
 `VLRUNIT` mudou**.
 
-O recálculo mora no processamento da requisição da tela, antes de persistir.
-Script server-side entra depois desse ponto.
+Conclusão da época: o recálculo moraria no processamento da requisição da
+tela, inalcançável por script.
+
+**Essa conclusão estava errada.** Ver a seção 10: o motor existe, é chamável,
+e eu procurei a classe no lugar errado. As quatro vias acima realmente não
+recalculam — o erro foi concluir que não havia nenhuma outra.
 
 Contraprova: digitando `100,00` na tela e salvando pela interface, o Sankhya
 produziu `VLRTOT 100,00`, `BASEIPI 100,00`, `VLRIPI 6,50`, `BASEICMS 106,50`,
@@ -156,9 +160,13 @@ marketplace.**
 Ausentes nesta versão (4.36b110): `CabecalhoNotaHelpper`, `ItemNotaHelpper`,
 `CACHelper`, `ConfirmacaoNota`, `ServiceBroker`.
 
+**O que eu não testei e deveria:** o subpacote
+`br.com.sankhya.modelcore.comercial.impostos`. Varri quinze nomes em
+`...comercial.*` e nenhum em `...comercial.impostos.*`. Ver seção 10.
+
 ---
 
-## 5. Replicar o motor fiscal — validação em escala
+## 5. Replicar o motor fiscal — validação em escala *(histórico — v5)*
 
 Com o recálculo fora de alcance, restou calcular tudo. As fórmulas foram
 testadas contra **20.856 itens** reais de pedidos TOP 1755:
@@ -215,7 +223,7 @@ para decidir não apareceu em nenhuma das seis hipóteses.
 
 ---
 
-## 6. A solução: auto-calibração
+## 6. A solução da v5: auto-calibração *(superada — ver seção 10)*
 
 Não é necessário saber **por que** um item está num regime ou no outro. É
 possível **ler qual regime vale** no próprio item, antes de alterá-lo:
@@ -382,10 +390,11 @@ isso que `OBSERVACAOINTERNA`, `OBSINTERNA` e `AD_OBSINTERNA` não existiam).
 - descontos do rodapé zerados
 - quantidade de volumes = soma das quantidades, KP fora
 - `TIPFRETE` = Extra nota quando frete = 0
-- `VLRUNIT`, `VLRDESC`, `PERCDESC`, `VLRTOT`, `BASEIPI`, `VLRIPI`,
-  `BASEICMS`, `VLRICMS` dos itens
+- `VLRUNIT`, `VLRTOT`, `VLRDESC`, `PERCDESC` dos itens (só valores)
+- recálculo fiscal pelo `ImpostosHelpper` — bases, impostos e `VLRNOTA`
 - inserção, atualização e remoção da linha de KP
-- `VLRNOTA` do cabeçalho
+- `VLRDESCTOTITEM` do rodapé
+- desconto Pix por canal (Shopee absorve, Mercado Livre só zera)
 
 ### Cortado ou pendente
 
@@ -428,6 +437,10 @@ Registrados porque explicam por que o desenho final é conservador.
    pela diferença exata do frete (visto no 202543: 29,90 + 10,83 = 40,73).
 7. **`QTDENTREGUE = 1` na linha de KP** — copiado do padrão de um gabarito
    faturado, tornava a linha nova inexcluível.
+8. **Concluir que o motor fiscal era inalcançável** — o erro mais caro.
+   Testei quinze nomes de classe em `...comercial.*`, nenhum no subpacote
+   `.impostos.`, e com a grafia "Helper" em vez de "Helpper". Toda a
+   arquitetura de auto-calibração da v5 existiu por causa disso.
 
 O padrão comum: supor o comportamento do ambiente em vez de sondá-lo. As
 sondas (v1 a v9, todas somente-leitura) foram o que corrigiu isso, e a
@@ -435,17 +448,111 @@ auto-calibração é a mesma ideia levada para dentro do script.
 
 ---
 
-## 10. Ressalva final
+## 10. A virada — o motor fiscal existe
 
-O script **replica o motor fiscal do Sankhya em vez de chamá-lo**. A
-auto-calibração protege contra fórmula errada, e a verificação pós-gravação
-com rollback protege contra gravação divergente. Mas gravar base de cálculo
-de IPI e ICMS por script é decisão de arquitetura, não de implementação:
+Depois de toda a construção da v5, o usuário trouxe dois scripts que já usava
+no ambiente. Um deles:
 
-- deve ser conhecida pelo CTO
-- a lógica deve ser revisada por quem cuida da parametrização fiscal
-- mudança de tributação de produto, entrada de produto de outro estado ou
-  aparecimento de redução de base alteram o perfil; a auto-calibração recusa
-  o item, mas **alguém precisa reagir quando as recusas começarem a aparecer**
+```javascript
+var ImpostosHelper = newJava(
+    "br.com.sankhya.modelcore.comercial.impostos.ImpostosHelpper");
+ImpostosHelper.setForcarRecalculo(true);
+ImpostosHelper.calcularImpostos(linha.getCampo("NUNOTA"));
+```
 
-E a correção definitiva continua sendo o ticket ao TemApi.
+É o motor fiscal do Sankhya, com 171 métodos — `calculaICMS`,
+`calcularCOFINS`, `atualizaCFO`, cálculo de ST, diferencial de alíquota,
+`calcularTotalItens`, `calcularTotalNota`.
+
+**Por que não achei:** procurei em `br.com.sankhya.modelcore.comercial.*` e
+nunca no subpacote `.impostos.`, e escrevi "Helper" onde o Sankhya usa
+"Helpper" com dois p. Quinze tentativas, todas no lugar errado.
+
+### Validação
+
+No pedido 202443, gravando `VLRUNIT`/`VLRTOT` = 100,00 pelo Jape — sem tocar
+em nenhum campo fiscal — e chamando o recálculo:
+
+| Campo | Antes | Depois | Esperado |
+|---|---|---|---|
+| BASEIPI | 375,49 | **100,00** | 100,00 |
+| VLRIPI | 24,41 | **6,50** | 6,50 |
+| BASEICMS | 139,00 | **−154,40** | −154,40 |
+| VLRICMS | 25,02 | **−27,79** | −27,79 |
+| VLRNOTA | 139,00 | **−154,40** | recalcula junto |
+
+Os negativos vêm do desconto de 260,90 seguir intacto contra um valor de
+100,00 — cenário absurdo do teste, processado exatamente pela fórmula. Prova
+que o motor calcula de verdade.
+
+E o `ImpostosHelpper` **respeita a transação**: após o `throw`, o pedido voltou
+integralmente a 375,49 com base 139,00.
+
+### Consequência
+
+A v6 grava apenas valores e delega o fiscal ao ERP. Some a auto-calibração,
+some o cálculo de bases e impostos, some a gravação do `VLRNOTA`, e some a
+ressalva de arquitetura sobre replicar o motor fiscal.
+
+O que a v5 ensinou não se perde: a semântica do `VLRDESC`, a base da faixa de
+KP, o desconto de arredondamento e a reconstrução da venda continuam valendo.
+O que mudou é quem calcula imposto.
+
+---
+
+## 11. Financeiro — a pendência que sobrou
+
+O `Vlr. do desdobramento` (Rodapé → Financeiro) não acompanha as alterações.
+Com desconto de arredondamento, fica um centavo fora do `Vlr. Nota` e trava a
+confirmação do pedido (`CORE_E02783`).
+
+O `ImpostosHelpper` recalcula impostos mas não refaz o desdobramento.
+
+**Resolvido operacionalmente:** o botão **Refazer Financeiro**, ação separada
+já existente, funciona. Rodar NORMALIZAR PEDIDO e depois ele. Testado: aplica
+o desconto de um centavo e o desdobramento fica exatamente igual ao valor da
+nota.
+
+**Não resolvido dentro do script.** A mesma chamada falha na v6:
+
+```
+PersistenceException: Parâmentro nulo: "nota":{"nunota":203267
+```
+
+A string JSON chega truncada, perdendo a chave de abertura e as de fechamento.
+Testado com aspas simples, aspas duplas e prefixo de schema — o erro persiste
+nas três. O botão separado usa a mesma sintaxe e funciona, então a diferença
+está no contexto de execução e ainda não foi identificada.
+
+Contorno manual alternativo, descoberto pelos operadores: no item, zerar o
+desconto e salvar, depois recolocar e salvar. Isso força o Sankhya a
+reprocessar — pista de que o gatilho está no save da tela.
+
+---
+
+## 12. Ressalva final
+
+A v6 **não replica mais o motor fiscal** — chama o do Sankhya. A ressalva de
+arquitetura que valia para a v5 caiu.
+
+O que permanece sob responsabilidade do script é regra de negócio da casa:
+reconstrução do preço de venda, desconto Pix por canal, faixa de KP, desconto
+de arredondamento e campos de cabeçalho. São decisões da BeBaby, não do ERP, e
+é onde elas devem estar.
+
+A verificação pós-gravação com rollback continua sendo a rede de segurança, e
+está provada em produção — inclusive com o recálculo fiscal já executado.
+
+**A correção definitiva continua sendo o ticket ao TemApi.** Este botão elimina
+o trabalho manual, não a causa.
+
+### Lição de método
+
+O padrão dos erros desta investigação foi supor o comportamento do ambiente em
+vez de sondá-lo. As sondas (v1 a v10, todas somente-leitura na primeira
+passada) foram o que corrigiu isso.
+
+Mas a sondagem também falhou uma vez, e de forma cara: varri quinze nomes de
+classe sem achar o motor fiscal, concluí que ele não existia, e construí uma
+arquitetura inteira em cima dessa conclusão. Buscar e não achar não é o mesmo
+que não existir — especialmente quando a busca depende de adivinhar nomes.
