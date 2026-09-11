@@ -4,19 +4,19 @@ Normaliza pedidos de marketplace (TOP 1755) no Sankhya: recalcula os valores
 dos itens a partir do preço de venda real do canal, gerencia a linha de KP e
 ajusta os campos do cabeçalho.
 
-**Status: em teste com operadores.**
+**Status: em homologação com operadores.**
 
 | | |
 |---|---|
-| Arquivo | `normalizador-pedido-v5.js` |
+| Arquivo | `Normalizar pedido v6.js` |
 | Tipo | Ação de tabela — Script (JavaScript) |
 | Instância | `CabecalhoNota` / **TGFCAB** |
 | Nome do botão | NORMALIZAR PEDIDO |
 | Motor | Rhino, Java 8 — código **ES5** |
 | Banco | Oracle |
 
-Para o histórico da investigação e os caminhos descartados, ver
-[`DIAGNOSTICO.md`](DIAGNOSTICO.md).
+`Normalizar pedido v5.js` fica no repositório como referência histórica.
+Ver [`Diagnostico.md`](Diagnostico.md) para a trilha da investigação.
 
 ---
 
@@ -24,9 +24,41 @@ Para o histórico da investigação e os caminhos descartados, ver
 
 O TemApi grava o `VLRUNIT` dividido pelo fator de IPI mas o `VLRDESC` sem
 dividir, e envia desconto absoluto calculado contra uma base diferente da que
-o ERP usa. O item chega com valor errado e o operador refaz à mão.
+o ERP aplica. O item chega com valor errado e o operador refaz à mão.
 
 Este script é **plano B**. A correção definitiva é o TemApi.
+
+---
+
+## A mudança da v5 para a v6
+
+A v5 **replicava** o motor fiscal: calculava `BASEIPI`, `VLRIPI`, `BASEICMS` e
+`VLRICMS` por conta própria, com auto-calibração para descobrir qual dos dois
+regimes de ICMS valia em cada item.
+
+Depois descobriu-se que o motor **é alcançável por script**:
+
+```javascript
+var IH = newJava("br.com.sankhya.modelcore.comercial.impostos.ImpostosHelpper");
+IH.setForcarRecalculo(true);
+IH.calcularImpostos(linhas[0].getCampo("NUNOTA"));
+```
+
+Provado no pedido 202443: gravando `VLRUNIT`/`VLRTOT` = 100,00 pelo Jape e
+chamando o recálculo, o Sankhya produziu `BASEIPI` 100,00, `VLRIPI` 6,50,
+`BASEICMS` −154,40 e `VLRICMS` −27,79 — exatamente a fórmula, inclusive nos
+negativos (o desconto de 260,90 seguia intacto no teste). O `VLRNOTA` também
+recalcula junto. E o `ImpostosHelpper` **respeita a transação**: após o
+`throw`, o pedido voltou integralmente ao estado anterior.
+
+**Resultado:** a v6 grava apenas valores — `VLRUNIT`, `VLRTOT`, `VLRDESC`,
+`PERCDESC` — e o ERP calcula o fiscal. Saiu a auto-calibração, saiu o cálculo
+de bases e impostos, saiu a gravação do `VLRNOTA`, e saiu a ressalva de
+arquitetura sobre replicar o motor fiscal.
+
+O script decide apenas regra de negócio da casa: reconstrução do preço de
+venda, desconto Pix por canal, faixa de KP, desconto de arredondamento e
+campos de cabeçalho.
 
 ---
 
@@ -35,16 +67,12 @@ Este script é **plano B**. A correção definitiva é o TemApi.
 O cálculo da faixa de KP depende da **venda total do pedido**. Numa ação sobre
 TGFITE, se o operador selecionasse um item só, o cálculo sairia errado.
 
-O script grava o cabeçalho pelo registro da tela (`linhas[0].setCampo` +
-`save()`) e os itens pelo Jape. O Jape grava coluna crua — que é exatamente o
-comportamento desejado aqui, já que o script calcula todos os campos
-derivados por conta própria.
+O cabeçalho é gravado pelo registro da tela (`linhas[0].setCampo` + `save()`)
+e os itens pelo Jape.
 
 ---
 
 ## Configuração
-
-Tudo no topo do arquivo.
 
 ```javascript
 var SIMULACAO        = true;    // true = só relatório, nada é gravado
@@ -52,22 +80,23 @@ var GRAVAR_CABECALHO = false;   // chaves independentes, ligar uma por vez
 var GRAVAR_ITENS     = false;
 var GRAVAR_KP        = false;
 
-var PIX_HABILITADO      = false;      // regra de Pix isolada — ver abaixo
+var RECALCULAR_IMPOSTOS = true; // ImpostosHelpper — só roda com itens ou KP
+var GRAVAR_FINANCEIRO   = false; // ver "Financeiro" abaixo — NÃO funciona
+
+var PIX_HABILITADO      = true;
+var CAMPO_CANAL         = "AD_CANAL_MKTPLACE";
+var CANAL_ABSORVE_PIX   = "SHOPEE";
+var CANAL_SO_ZERA       = "MERCADO_LIVRE";
+var RECUSAR_CANAL_DESCONHECIDO = true;
+
 var CODCENCUS_ALVO      = 20000000;   // MARKETPLACE
 var CODTIPOPER_ESPERADO = 1755;       // PEDIDO MARKETPLACE
 var CAMPO_OBS_INTERNA   = "AD_INTERNAOBS";
-var CAMPO_NOME_USUARIO  = "NOMEUSU";
 var PRESERVAR_OBS_INTERNA = true;     // não sobrescreve autoria de outro operador
 var TIPFRETE_EXTRANOTA  = "N";        // confirmado na tela
 var TIPFRETE_INCLUSO    = null;       // "S" após confirmar na tela
 var SCH                 = "";         // "SANKHYA." se der ORA-00942
-var TOL                 = 0.011;      // tolerância geral de comparação
-var DESC_TOTAL_LINHA    = true;       // VLRDESC é total da linha
 ```
-
-`SIMULACAO = true` é o padrão e produz o relatório completo sem tocar no
-pedido. As três chaves de gravação são independentes para permitir ativação
-gradual.
 
 ### Tabela de KP
 
@@ -84,22 +113,27 @@ var KP_TABLE = [
 ```
 
 Venda abaixo de 74,75 → sem KP. Acima de 3.588,00 → KP24 (teto).
-SKUs 2310–2316 são reconhecidos como linha de KP em qualquer lugar do script.
 
 ---
 
 ## Fluxo
 
 ```
-1. LER          cabeçalho (Jape) + itens (getQuery)
-2. VALIDAR      TOP, desconto no rodapé, coerência do VLRNOTA atual
-3. CALCULAR     reconstruir venda → devolver KP → faixa → alvos → calibrar → derivar
+1. LER          cabeçalho (Jape) + itens + financeiro (getQuery)
+2. VALIDAR      TOP, consistência dos itens, regra de Pix, classe de impostos
+3. CALCULAR     venda → devolver KP → Pix → faixa → alvos → valores
 4. RELATAR      antes → depois de cada campo
 5. (parar aqui se SIMULACAO ou se houver erro)
-6. GRAVAR       itens → KP → cabeçalho
+6. GRAVAR       cabeçalho → itens → KP → ImpostosHelpper
 7. VERIFICAR    reler do banco e comparar; divergência → throw = ROLLBACK
 8. RETORNAR     mensagem = texto
 ```
+
+**A ordem importa.** O cabeçalho vai primeiro por dois motivos: o
+`Registro.save()` usa o snapshot em memória e sobrescreveria o `VLRNOTA` que o
+motor calcular depois; e o `VLRDESCTOT` precisa estar zerado antes do
+recálculo, senão o Pix é descontado duas vezes (visto no 202443: `VLRNOTA`
+veio 111,20 em vez de 125,10).
 
 ---
 
@@ -110,97 +144,62 @@ SKUs 2310–2316 são reconhecidos como linha de KP em qualquer lugar do script.
 O preço real do canal não está em campo nenhum. É reconstruído:
 
 ```javascript
-descUnit      = vlrdesc / qtd            // VLRDESC é total da linha
-_vendaUnit    = round2(vlrunit * (1 + aliqipi/100) - descUnit)
-_vendaLinha   = round2(_vendaUnit * qtd)
+descUnit    = vlrdesc / qtd              // VLRDESC é total da linha
+vendaUnit   = round2(vlrunit * (1 + aliqipi/100) - descUnit)
+vendaLinha  = round2(vendaUnit * qtd)
 ```
 
-Validado contra seis pedidos reais, incluindo quantidades 2, 3 e 4.
-
-Item cuja venda reconstruída dê zero ou negativo é **recusado** — significa
-desconto maior que o preço, como no pedido 195532.
+Item cuja venda reconstruída dê zero ou negativo é **recusado**.
 
 ### 2. Idempotência — devolver o KP à base
 
 Num pedido já normalizado o KP foi retirado dos produtos e virou linha
 própria. A faixa é decidida pelo **total da venda incluindo o KP**, então o
-KP existente precisa voltar à base antes de recalcular:
+KP existente precisa voltar à base antes de recalcular. Sem isso, clicar duas
+vezes subtrairia o KP duas vezes.
+
+Confirmado em 7 de 7 pedidos já normalizados — a base "produtos apenas"
+erraria a faixa em dois deles.
+
+### 3. Desconto Pix — regra por canal
+
+Canal lido de `TGFCAB.AD_CANAL_MKTPLACE`:
+
+| Canal | Desconto no rodapé | Ação |
+|---|---|---|
+| `SHOPEE` | > 0 | **absorve** o Pix na base e zera o campo |
+| `MERCADO_LIVRE` | > 0 | apenas zera o campo (o valor do pedido sobe) |
+| não reconhecido | > 0 | **recusa** |
+| qualquer | 0 | segue normal |
+
+Só `'SHOPEE'` e `'MERCADO_LIVRE'` em caixa alta são reconhecidos. O banco tem
+variações (`SHPS`, `MELI`, `mercado livre`, nulo) que caem em não reconhecido;
+nenhuma tem desconto no rodapé hoje.
+
+Ocorrência: 4 pedidos em 7.454 na Shopee, 27 em 6.954 no Mercado Livre.
+
+Validado contra o pedido 203430: venda 159,90 − Pix 6,99 = 152,91, que é o
+`Vlr. Nota` real, e o item fecha em 123,01 — o mesmo valor que o operador
+havia digitado à mão.
+
+### 4. Alvo de cada linha
 
 ```javascript
-kpDevolvido = Σ (kp.vlrunit * (1+IPI) - kp.desc/qtd) * qtd
-totalVenda  = somaProdutos + kpDevolvido
-// e devolvido proporcionalmente a cada produto, preservando as proporções
-```
-
-Sem isso, clicar duas vezes no botão subtrairia o KP duas vezes. Confirmado em
-7 de 7 pedidos já normalizados — a base "produtos apenas" erraria a faixa em
-dois deles.
-
-### 3. Alvo de cada linha
-
-```javascript
-alvoTotal  = totalVenda - kpVl
-alvo[i]    = round2(vendaLinha[i] - kpVl * (vendaLinha[i] / totalVenda))
+brutoAlvo = totalVenda - pix
+alvo[i]   = round2(vendaLinha[i] - (kpVl + pix) * (vendaLinha[i] / totalVenda))
 // sobra de arredondamento da distribuição vai para a maior linha
 ```
 
-Assim cada linha fecha individualmente **e** a soma fecha no total.
-
-### 4. Auto-calibração — `calibrar(it)`
-
-**É o núcleo da segurança do script.** Antes de calcular qualquer valor novo,
-cada fórmula é testada contra o estado atual do próprio item:
-
-| # | Verificação |
-|---|---|
-| 1 | `VLRTOT == VLRUNIT × QTDNEG` — se falhar, o item foi alterado sem recálculo e nada mais é confiável |
-| 2 | `BASEIPI == VLRTOT` (ou zero, quando não há IPI) |
-| 3 | `VLRIPI == BASEIPI × ALIQIPI/100` |
-| 4 | `BASEICMS` bate com um dos dois regimes conhecidos → grava qual |
-| 5 | `VLRICMS == BASEICMS × ALIQICMS/100` |
-
-Qualquer falha → **item não modelável, pedido recusado, nada é alterado.**
-
-O passo 4 resolve o problema que travou o projeto: existem dois regimes de
-base de ICMS em uso e o discriminador não foi identificado.
-
-```javascript
-comIpi = round2(vlrtot + vlripi - vlrdesc);   // regime COM_IPI
-semIpi = round2(vlrtot - vlrdesc);            // regime SEM_IPI
-```
-
-O script não precisa saber **por que** o item está num regime — ele **lê qual
-vale** naquele item e aplica o mesmo ao valor novo.
-
-### 5. Derivação — `derivar(...)`
-
-```javascript
-unit    = round2((alvoLinha / (1+IPI)) / qtd)
-vlrtot  = round2(unit * qtd)
-baseipi = (aliqipi > 0 || baseIpiSegueTot) ? vlrtot : 0
-vlripi  = round2(baseipi * aliqipi / 100)
-vlrdesc = round2(vlrtot + vlripi - alvoLinha)     // resíduo de arredondamento
-percdesc= round2(vlrdesc / vlrtot * 100)
-baseicms= regime === "COM_IPI" ? vlrtot + vlripi - vlrdesc
-                               : vlrtot - vlrdesc
-vlricms = round2(baseicms * aliqicms / 100)
-fecha   = round2(vlrtot + vlripi - vlrdesc)       // deve igualar alvoLinha
-```
-
-Se o bruto ficar **abaixo** do alvo, o unitário sobe um centavo e recalcula —
-desconto nunca fica negativo (até 4 tentativas).
-
-### 6. Desconto de arredondamento — regra da casa
+### 5. Desconto de arredondamento — regra da casa
 
 Com IPI não existe valor unitário de 2 decimais que reconstitua qualquer alvo:
 
 ```
 29,90 ÷ 1,065 = 28,0751  →  28,08
-28,08 × 1,065 = 29,9052  →  29,91   (um centavo acima do alvo)
+28,08 × 1,065 = 29,9052  →  29,91   (um centavo acima)
 ```
 
-O resíduo vai para o `VLRDESC`, que é o que os operadores já fazem. Resultado
-validado contra casos reais:
+O resíduo vai para o `VLRDESC`, que é o que os operadores já fazem. Validado:
 
 | Alvo | IPI | Qtd | VLRUNIT | VLRDESC | Fecha |
 |---|---|---|---|---|---|
@@ -208,51 +207,32 @@ validado contra casos reais:
 | 109,10 | 6,5% | 1 | 102,44 | 0,00 | 109,10 ✔ |
 | 239,60 | 6,5% | 4 | 56,25 | 0,03 | 239,60 ✔ |
 | 55,20 | 9,75% | 3 | 16,77 | 0,02 | 55,20 ✔ |
-| 729,91 | 3,25% | 1 | 706,93 | 0,00 | 729,91 ✔ |
 
-O desconto só é diferente de zero quando o arredondamento exige. O script
-avisa se o resíduo passar de `0,01 × qtd + 0,01`, o que indicaria outra causa.
+O IPI é calculado aqui **apenas para decidir** o valor unitário e o resíduo —
+não é gravado. A verificação confere se o IPI que o motor produziu bate com o
+que guiou o cálculo; divergência reprova.
 
-### 7. Linha de KP
-
-Quatro ações possíveis:
+### 6. Linha de KP
 
 | Situação | Ação |
 |---|---|
-| faixa aplicável e nenhuma linha de KP | `INSERIR` |
+| faixa aplicável e nenhuma linha | `INSERIR` |
 | faixa aplicável e linha existente | `ATUALIZAR` (remove e reinsere) |
 | sem faixa e linha existente | `REMOVER` |
 | sem faixa e sem linha | `NENHUMA` |
 
-`ATUALIZAR` é remover e reinserir, não editar — mais simples e sempre
-consistente, ao custo de mudar a sequência da linha.
-
-Os campos fiscais são **copiados de uma linha de KP real do mesmo SKU** num
-outro pedido 1755 sem desconto:
-
-```javascript
-gabaritoKp(sku, nunota)  // lê pelo Jape → getProperty() devolve o tipo certo
-```
-
-Isso é **exato, não estimado**: o KP tem valor fixo por SKU, então a base de
-cálculo do gabarito é a mesma que o Sankhya calcularia. Antes de copiar, o
-script confere que o gabarito tem o valor esperado da faixa — se divergir,
-recusa.
+Os campos do produto são copiados de uma linha de KP real do mesmo SKU num
+outro pedido 1755 sem desconto. Como o KP tem valor fixo por SKU, a cópia é
+exata. O script confere que o gabarito tem o valor esperado da faixa antes de
+copiar.
 
 **Campos de ciclo de vida não vêm do gabarito.** Ele vem de um pedido já
 faturado, onde `QTDENTREGUE=1`, `PENDENTE='N'` e `STATUSNOTA='L'` são
 legítimos. Copiar isso torna a linha nova inexcluível
-(`CORE_E01541 — Item já foi faturado`). Portanto:
+(`CORE_E01541 — Item já foi faturado`). Portanto `QTDENTREGUE` = sempre `0`,
+e `PENDENTE`/`STATUSNOTA` vêm de um item de produto do próprio pedido.
 
-- `QTDENTREGUE` = sempre `0`
-- `PENDENTE` e `STATUSNOTA` = lidos de um item de produto **do próprio pedido**
-
-Se não houver gabarito para a faixa, o script **recusa** em vez de inserir
-linha incompleta. Faixas nunca usadas exigem um KP manual uma vez.
-
-### 8. Cabeçalho
-
-Gravado por `linhas[0].setCampo(...)` + `save()`:
+### 7. Cabeçalho
 
 | Campo | Valor |
 |---|---|
@@ -261,133 +241,138 @@ Gravado por `linhas[0].setCampo(...)` + `save()`:
 | `OBSERVACAO` | número único do pedido |
 | `AD_INTERNAOBS` | `NOME - dd/mm` — **preservado se já preenchido** |
 | `VLRDESCTOT`, `PERCDESC` | 0 |
-| `VLRDESCTOTITEM` / `VLRDESCTOTITEMMOE` | soma dos `VLRDESC` dos itens no estado novo |
+| `VLRDESCTOTITEM` / `VLRDESCTOTITEMMOE` | soma dos `VLRDESC` dos itens |
 | `QTDVOL` | soma das quantidades, KP fora |
-| `VLRNOTA` | venda + frete |
 | `TIPFRETE` | `'N'` (Extra nota) quando frete = 0 |
 
-`PRESERVAR_OBS_INTERNA = true` evita apagar a autoria de quem normalizou
-antes — a correção manual não deixa outro rastro.
+O `VLRNOTA` **não é gravado** — o motor calcula.
 
-**"Desconto total por item" é coluna gravada, não cálculo de exibição.**
-`VLRDESCTOTITEM` no `TGFCAB`. Como nada recalcula, precisa ser escrita: no
-202443 os itens ficaram com `VLRDESC 0` e o rodapé continuava mostrando
-260,90. O valor correto é a soma dos descontos dos itens no estado novo — o
-resíduo de arredondamento, ou zero.
+`VLRDESCTOTITEM` é coluna gravada, não cálculo de exibição: sem escrevê-la, o
+rodapé continua mostrando o desconto antigo.
+
+### 8. Recálculo fiscal
+
+```javascript
+var IH = newJava(CLS_IMPOSTOS);
+IH.setForcarRecalculo(true);
+IH.calcularImpostos(linhas[0].getCampo("NUNOTA"));
+```
+
+Recalcula `BASEIPI`, `VLRIPI`, `BASEICMS`, `VLRICMS` e `VLRNOTA`. Só roda se
+`GRAVAR_ITENS` ou `GRAVAR_KP` estiverem ligados.
 
 ### 9. Verificação e rollback
 
-Depois de gravar, o script **relê do banco** e compara. Confere por item o
-`VLRUNIT`, `VLRTOT`, `VLRDESC`, `VLRIPI`, `BASEICMS` e `VLRICMS`; a contagem e
-o valor da linha de KP; os campos do cabeçalho; e dois fechamentos:
+Após gravar, o script relê do banco e confere por item o `VLRUNIT`, `VLRDESC`
+e o `VLRIPI` que o motor calculou; a contagem e o valor da linha de KP; os
+campos do cabeçalho; e dois fechamentos exatos:
 
 ```
-soma dos itens (VLRTOT + VLRIPI − VLRDESC)  ==  venda        (exato, ±0,005)
-VLRNOTA                                     ==  venda + frete (exato, ±0,005)
+soma dos itens (VLRTOT + VLRIPI − VLRDESC)  ==  venda − Pix
+VLRNOTA                                      ==  venda − Pix + frete
 ```
 
-Divergência → `throw`, que **desfaz a transação**. Comprovado em produção: o
-KP foi inserido, o fechamento reprovou, e o pedido ficou sem a linha.
+Divergência → `throw`, que **desfaz a transação**. Comprovado várias vezes em
+produção, inclusive com o `ImpostosHelpper` já chamado.
 
-O fechamento usa tolerância **exata** (não os 0,011 gerais) porque, com o
-desconto de arredondamento, não há motivo para sobrar centavo.
+---
+
+## Financeiro — pendência conhecida
+
+O campo `Vlr. do desdobramento` (Rodapé → Financeiro) **não acompanha** as
+alterações. Quando há desconto de arredondamento, o financeiro fica um centavo
+fora do `Vlr. Nota` e o operador **não consegue confirmar o pedido**.
+
+O `ImpostosHelpper` recalcula impostos mas não refaz o desdobramento.
+
+**Solução operacional atual: dois cliques.** Rodar NORMALIZAR PEDIDO e depois
+o botão **Refazer Financeiro** (ação separada, já existente). Testado e
+funciona: aplica o desconto de um centavo e o `Vlr. do desdobramento` fica
+exatamente igual ao `Vlr. Nota`.
+
+**Por que não está dentro do script.** A mesma chamada falha quando executada
+de dentro da v6:
+
+```
+PersistenceException: Parâmentro nulo: "nota":{"nunota":203267
+```
+
+A string JSON chega truncada — perde a chave de abertura e as de fechamento.
+Testado com aspas simples, aspas duplas e prefixo de schema; o erro persiste
+em todas. O botão separado usa a mesma sintaxe e funciona, então a diferença
+está no contexto de execução, ainda não identificada.
+
+`GRAVAR_FINANCEIRO` fica `false`. Quando o financeiro diverge e a chave está
+desligada, o script emite aviso orientando o operador.
+
+Contorno manual alternativo, se o botão não estiver disponível: no item, zerar
+o desconto e salvar, depois recolocar e salvar.
 
 ---
 
 ## Casos em que o pedido é recusado
 
-Nenhuma alteração é feita:
-
 - TOP diferente de 1755
 - mais de um pedido selecionado
 - pedido sem itens, ou só com linhas de KP
-- **desconto no rodapé** (`VLRDESCTOT` ou `PERCDESC`) com `PIX_HABILITADO = false`
-- item **não modelável** — qualquer fórmula falhando na calibração
-- item com venda reconstruída ≤ 0 (desconto maior que o preço)
+- item inconsistente (`VLRTOT` fora de `VLRUNIT × QTDNEG`)
+- item com venda reconstruída ≤ 0
+- desconto no rodapé com canal não reconhecido
 - alvo que não fecha com 2 decimais
 - sem gabarito de KP para a faixa necessária
+- `RECALCULAR_IMPOSTOS` ligado e a classe ausente no ambiente
 
 ---
 
 ## Ativação gradual
 
 ```
-1. SIMULACAO = true                                   → conferir o relatório
-2. SIMULACAO = false, três chaves false               → exercita o caminho até o fim
-3. GRAVAR_ITENS = true + GRAVAR_KP = true             → a unidade que fecha o valor
-4. + GRAVAR_CABECALHO = true                          → completo
+1. SIMULACAO = true                          → conferir o relatório
+2. SIMULACAO = false, três chaves false      → exercita o caminho até o fim
+3. GRAVAR_ITENS + GRAVAR_KP + GRAVAR_CABECALHO juntos
 ```
 
-Ligar `GRAVAR_ITENS` ou `GRAVAR_KP` **sozinho** reprova por construção em
-pedido que precisa de KP novo: o item sozinho não reconstitui a venda, e o KP
-sozinho a excede. Os dois formam a unidade que fecha.
+**As três chaves andam juntas em pedido com Pix.** Ligar itens sem cabeçalho
+deixa o `VLRDESCTOT` no pedido, e o motor desconta o Pix duas vezes ao
+recalcular o `VLRNOTA`. A verificação pega e desfaz, mas é rodada perdida.
 
-Rodar duas vezes seguidas com tudo ligado é o teste de idempotência — nenhum
-valor de item deve mudar na segunda passagem.
+Rodar duas vezes seguidas é o teste de idempotência — nenhum valor de item
+deve mudar na segunda passagem.
 
 ---
 
 ## Limitações conhecidas
 
-**Replica o motor fiscal em vez de chamá-lo.** O Sankhya não recalcula em
-gravação server-side (quatro vias testadas, ver `DIAGNOSTICO.md`). A
-auto-calibração e a verificação com rollback são as proteções, mas gravar base
-de IPI e ICMS por script é decisão de arquitetura que deve ser conhecida pelo
-CTO e revisada por quem cuida do fiscal.
-
-**Gravação do cabeçalho pode comitar em transação própria.** Observado no
-pedido 202543: após uma execução reprovada, `QTDVOL` e `DTNEG` permaneceram
-alterados enquanto os itens foram desfeitos. Indício de que
-`Registro.save()` confirma separadamente do Jape. Correção pendente: verificar
-os itens **antes** de encostar no cabeçalho, em vez de verificar tudo no fim.
-
-**Desconto Pix — regra por canal, ativa.** O Pix chega em Rodapé → Totais
-(`VLRDESCTOT` / `PERCDESC`). O canal é lido de `TGFCAB.AD_CANAL_MKTPLACE`:
-
-| Canal | Desconto no rodapé | Ação |
-|---|---|---|
-| `SHOPEE` | > 0 | **absorve** o Pix na base e zera o campo |
-| `MERCADO_LIVRE` | > 0 | apenas zera o campo (o valor do pedido sobe) |
-| não reconhecido | > 0 | **recusa** (`RECUSAR_CANAL_DESCONHECIDO = true`) |
-| qualquer | 0 | segue normal |
-
-Só `'SHOPEE'` e `'MERCADO_LIVRE'` em caixa alta são reconhecidos. O banco tem
-variações sujas (`SHPS`, `MELI`, `mercado livre`, nulo) que caem em não
-reconhecido — nenhuma delas tem desconto no rodapé hoje.
-
-Ocorrência: 4 pedidos em 7.454 na Shopee, 27 em 6.954 no Mercado Livre.
-
-Ressalva de reexecução: a faixa de KP é decidida sobre a venda **antes** do
-Pix, e essa informação desaparece quando o campo é zerado. Se o Pix cruzar uma
-fronteira de faixa, uma segunda execução pode escolher faixa menor.
-
-**Pix agrava o bug do financeiro.** Com o Pix absorvido nos itens, o campo
-`Vlr. do desdobramento` (Rodapé → Financeiro) provavelmente não acompanha, o
-que impede a confirmação. O script emite aviso quando o Pix é maior que zero.
+**Financeiro.** Ver seção acima. É a pendência principal.
 
 **`TIPFRETE` Incluso não confirmado.** `TIPFRETE_INCLUSO = null`, então pedido
 com frete não tem o campo alterado. Falta abrir um pedido com `TIPFRETE = 'S'`
 e frete > 0 e conferir o rótulo no Rodapé → Transporte.
 
-**Acréscimo por parcelamento** entra pelo parâmetro `ACRESCIMO` do botão, por
-não ter campo conhecido no ERP.
+**Mercado Livre com Pix sobe o valor do pedido.** Zerar o desconto sem
+absorver aumenta o total pelo montante do desconto. Comportamento definido,
+mas vale conferir num caso real.
 
-**Distribuição proporcional.** Pix e acréscimo são distribuídos entre itens
-proporcionalmente ao valor, consistente com o KP. A calculadora original
-dividia igualmente — decisão pendente de confirmação.
+**Reexecução com Pix.** A faixa de KP é decidida sobre a venda antes do Pix, e
+essa informação desaparece quando o campo é zerado. Se o Pix cruzar uma
+fronteira de faixa, uma segunda execução pode escolher faixa menor.
+
+**Acréscimo por parcelamento** não tem campo conhecido no ERP.
+
+**Distribuição proporcional.** Pix e KP são distribuídos entre itens
+proporcionalmente ao valor. A calculadora original dividia o Pix igualmente —
+decisão pendente de confirmação.
 
 **Linha de KP inserida por script** não passa pela liberação normal. Vale
 confirmar com quem conhece o fluxo de faturamento se há outros campos de
 controle além dos tratados.
 
+**Pedido criado manualmente** vem sem `AD_CANAL_MKTPLACE`. Se tiver desconto
+no rodapé, é recusado.
+
 ---
 
 ## Manutenção
-
-**Recusas são sinal, não ruído.** Se itens começarem a aparecer como "não
-modelável", algo mudou na tributação — produto de outro estado, redução de
-base, alteração de parametrização. A auto-calibração protege o dado, mas
-alguém precisa investigar a causa.
 
 **Rhino, cuidados obrigatórios:**
 
@@ -397,12 +382,15 @@ alguém precisa investigar a causa.
   quebra o Rhino com erro **não capturável**
 - ES5: sem `let`/`const`, arrow, template literal, `Object.assign`,
   `Number.EPSILON`
-- `BigDecimal` sempre construído a partir de **string**, para não levar ruído
-  de ponto flutuante ao banco
+- `BigDecimal` sempre construído a partir de **string**
 - retorno ao usuário é **atribuição**: `mensagem = txt`
 
 **Alterar a tabela de KP** exige apenas editar `KP_TABLE`. Faixa nova precisa
-de um KP inserido manualmente uma vez, para servir de gabarito fiscal.
+de um KP inserido manualmente uma vez, para servir de gabarito.
+
+**Relogar antes de usar em produção.** O `AuthenticationInfo` cacheia o VO do
+usuário na sessão, então mudanças no cadastro (nome, por exemplo) só aparecem
+após novo login. A Observação Interna registra o que estiver em cache.
 
 ---
 
@@ -410,6 +398,8 @@ de um KP inserido manualmente uma vez, para servir de gabarito fiscal.
 
 | Arquivo | Conteúdo |
 |---|---|
-| `normalizador-pedido-v5.js` | o script |
+| `Normalizar pedido v6.js` | o script em uso |
+| `Normalizar pedido v5.js` | versão anterior, mantida como referência |
 | `README.md` | este documento |
-| `DIAGNOSTICO.md` | histórico da investigação e caminhos descartados |
+| `Diagnostico.md` | histórico da investigação e caminhos descartados |
+| `demo.mp4` | demonstração |
