@@ -508,25 +508,46 @@ confirmação do pedido (`CORE_E02783`).
 
 O `ImpostosHelpper` recalcula impostos mas não refaz o desdobramento.
 
-**Resolvido operacionalmente:** o botão **Refazer Financeiro**, ação separada
-já existente, funciona. Rodar NORMALIZAR PEDIDO e depois ele. Testado: aplica
-o desconto de um centavo e o desdobramento fica exatamente igual ao valor da
-nota.
+### A pista falsa do CACSP
 
-**Não resolvido dentro do script.** A mesma chamada falha na v6:
+Existia um botão "REFAZER O FINANCEIRO" chamando
+`EXEC SANKHYA.ENVIACOMANDO_JSON 'mgecom', 'CACSP.refazerFinanceiro', '{...}'`.
+Parecia funcionar.
+
+Dentro da v6 a mesma chamada falhava com `Parâmentro nulo: "nota":{"nunota":N`
+— string aparentemente truncada nas chaves. Levantei a hipótese de que o
+`getQuery().update()` interpretasse `{ }` como macro e as consumisse (o
+`JdbcWrapper` tem `doTranslateMacros`).
+
+Sete variações testadas: aspas simples, duplas, escapadas, com e sem espaços,
+prefixo de schema, `BEGIN...END` e `CALL`. Todas falharam igual — até o
+`BEGIN...END`, que fez o Oracle avaliar de verdade e revelar a causa:
 
 ```
-PersistenceException: Parâmentro nulo: "nota":{"nunota":203267
+PLS-00201: o identificador 'SANKHYA.ENVIACOMANDO_JSON' deve ser declarado
 ```
 
-A string JSON chega truncada, perdendo a chave de abertura e as de fechamento.
-Testado com aspas simples, aspas duplas e prefixo de schema — o erro persiste
-nas três. O botão separado usa a mesma sintaxe e funciona, então a diferença
-está no contexto de execução e ainda não foi identificada.
+**A procedure não existe neste ambiente.** Confirmado no `ALL_OBJECTS`:
+nenhum objeto com esse nome.
 
-Contorno manual alternativo, descoberto pelos operadores: no item, zerar o
-desconto e salvar, depois recolocar e salvar. Isso força o Sankhya a
-reprocessar — pista de que o gatilho está no save da tela.
+O botão separado **nunca funcionou** — o `try/catch` dele apenas imprimia o
+erro no log do servidor, e ninguém via. O efeito observado vinha de outro
+lugar, provavelmente do recálculo da v6 ou do refresh da tela.
+
+Lição: `catch` que engole erro transforma falha silenciosa em falsa
+confirmação, e custou várias rodadas de investigação na direção errada.
+
+### Contorno que realmente funciona
+
+Descoberto pelos operadores: no item, zerar o desconto e salvar, depois
+recolocar e salvar. Isso força o Sankhya a reprocessar — pista de que o
+gatilho está no save da tela.
+
+### Próximo caminho
+
+Repetir o que deu certo com os impostos: achar a classe Java que refaz o
+desdobramento e chamá-la por `newJava`. A sonda v12 enumera as classes reais
+do JAR do modelcore em vez de adivinhar nomes.
 
 ---
 
