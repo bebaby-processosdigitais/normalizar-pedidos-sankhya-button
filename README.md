@@ -285,28 +285,41 @@ fora do `Vlr. Nota` e o operador **não consegue confirmar o pedido**.
 
 O `ImpostosHelpper` recalcula impostos mas não refaz o desdobramento.
 
-**Solução operacional atual: dois cliques.** Rodar NORMALIZAR PEDIDO e depois
-o botão **Refazer Financeiro** (ação separada, já existente). Testado e
-funciona: aplica o desconto de um centavo e o `Vlr. do desdobramento` fica
-exatamente igual ao `Vlr. Nota`.
+**Contorno atual, feito à mão pelo operador:** no item, zerar o desconto e
+salvar, depois recolocar o desconto e salvar de novo. Isso força o Sankhya a
+reprocessar e o desdobramento acompanha.
 
-**Por que não está dentro do script.** A mesma chamada falha quando executada
-de dentro da v6:
+### O caminho CACSP está morto
+
+A tentativa de automatizar via
+`EXEC SANKHYA.ENVIACOMANDO_JSON 'mgecom', 'CACSP.refazerFinanceiro', ...`
+**não funciona neste ambiente**. A procedure não existe:
 
 ```
-PersistenceException: Parâmentro nulo: "nota":{"nunota":203267
+PLS-00201: o identificador 'SANKHYA.ENVIACOMANDO_JSON' deve ser declarado
 ```
 
-A string JSON chega truncada — perde a chave de abertura e as de fechamento.
-Testado com aspas simples, aspas duplas e prefixo de schema; o erro persiste
-em todas. O botão separado usa a mesma sintaxe e funciona, então a diferença
-está no contexto de execução, ainda não identificada.
+Confirmado por consulta ao `ALL_OBJECTS` — nenhum objeto com esse nome.
 
-`GRAVAR_FINANCEIRO` fica `false`. Quando o financeiro diverge e a chave está
-desligada, o script emite aviso orientando o operador.
+Houve um botão separado "REFAZER O FINANCEIRO" usando essa chamada dentro de
+um `try/catch` que apenas imprimia no log. **Ele nunca funcionou**; o erro
+ficava invisível. O efeito observado ao clicá-lo vinha de outro lugar —
+provavelmente do recálculo da v6 ou do refresh da tela.
 
-Contorno manual alternativo, se o botão não estiver disponível: no item, zerar
-o desconto e salvar, depois recolocar e salvar.
+Sete variações de sintaxe foram testadas (aspas simples, duplas, escapadas,
+com e sem espaços, `BEGIN...END`, `CALL`) antes de o `BEGIN...END` revelar a
+causa real: o objeto não existe.
+
+`GRAVAR_FINANCEIRO` fica `false`. Quando o financeiro diverge, o script emite
+aviso orientando o operador a fazer o contorno manual.
+
+### Próximo caminho a investigar
+
+Repetir o que funcionou com os impostos: achar a **classe Java** que refaz o
+desdobramento e chamá-la por `newJava`, sem passar por SQL. A sonda
+`sonda-v12-financeiro.js` enumera as classes reais do JAR do modelcore em vez
+de adivinhar nomes — método que o caso do `ImpostosHelpper` mostrou ser o
+certo.
 
 ---
 
