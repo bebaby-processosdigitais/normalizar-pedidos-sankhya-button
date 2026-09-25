@@ -1,22 +1,24 @@
 # NORMALIZAR PEDIDO — botão de ação Sankhya
 
-Normaliza pedidos de marketplace (TOP 1755) no Sankhya: recalcula os valores
-dos itens a partir do preço de venda real do canal, gerencia a linha de KP e
+Normaliza pedidos de **marketplace** e de **site** no Sankhya: recalcula os
+valores dos itens a partir do preço de venda real, gerencia a linha de KP e
 ajusta os campos do cabeçalho.
 
 **Status: em homologação com operadores.**
 
 | | |
 |---|---|
-| Arquivo | `Normalizar pedido v6.js` |
+| Arquivo | `Normalizar pedido v7.js` |
 | Tipo | Ação de tabela — Script (JavaScript) |
 | Instância | `CabecalhoNota` / **TGFCAB** |
 | Nome do botão | NORMALIZAR PEDIDO |
 | Motor | Rhino, Java 8 — código **ES5** |
 | Banco | Oracle |
 
-`Normalizar pedido v5.js` fica no repositório como referência histórica.
-Ver [`Diagnostico.md`](Diagnostico.md) para a trilha da investigação.
+`Normalizar pedido v5.js` e `v6.js` ficam no repositório como referência
+histórica. Ver [`Diagnostico.md`](Diagnostico.md) para a trilha da
+investigação e [`REFERENCIA-API-SANKHYA.md`](REFERENCIA-API-SANKHYA.md) para
+o catálogo do que é acessível em botões de ação.
 
 ---
 
@@ -27,6 +29,47 @@ dividir, e envia desconto absoluto calculado contra uma base diferente da que
 o ERP aplica. O item chega com valor errado e o operador refaz à mão.
 
 Este script é **plano B**. A correção definitiva é o TemApi.
+
+---
+
+## Perfis — as duas origens de pedido
+
+A v7 detecta a origem do pedido e aplica as regras correspondentes. **O
+cálculo de valor, KP, Pix e arredondamento é idêntico nos dois**; o que muda
+é o cabeçalho.
+
+| | MARKETPLACE | SITE |
+|---|---|---|
+| Detecção | `CODTIPOPER` = 1755 | `CODVEND` = 12 (ABC) ou 26 (KIKKABOO) |
+| Datas | hoje | hoje |
+| Centro de resultado | 20000000 | **não altera** (já vem correto) |
+| Observação | número único | número único |
+| Observação Interna | `NOME - dd/mm` | loja, `#pedido externo`, `NOME - dd/mm` |
+| Descontos do rodapé | zerados | zerados |
+| Desconto absorvido | regra por canal | **sempre absorve** |
+| Volumes | soma das quantidades | idem |
+| `TIPFRETE` | Extra nota se frete = 0 | **não altera** |
+
+O site tem prioridade na detecção: o `CODVEND` é mais específico que a TOP.
+Pedido que não caia em nenhum perfil é recusado.
+
+As TOPs de site observadas são **1722** (pedido) e **1728** (NF-e de venda).
+Outras aparecem na base (2201, 1107, 1761) e geram **aviso**, não recusa.
+
+### Observação Interna no site
+
+O script grava só o cabeçalho do texto; **o operador completa o resto**:
+
+```
+SITE KIKKABOO
+#80315
+
+DANIEL - 25/09
+        ← operador acrescenta transportadora, parcelamento, ID da transação
+```
+
+Se `AD_PEDIDOMKTPLACE` estiver vazio, a linha do `#` é omitida. Campo já
+preenchido é **preservado**.
 
 ---
 
@@ -161,9 +204,12 @@ vezes subtrairia o KP duas vezes.
 Confirmado em 7 de 7 pedidos já normalizados — a base "produtos apenas"
 erraria a faixa em dois deles.
 
-### 3. Desconto Pix — regra por canal
+### 3. Desconto do rodapé
 
-Canal lido de `TGFCAB.AD_CANAL_MKTPLACE`:
+**No perfil SITE, o desconto do rodapé sempre entra na base** — não há regra
+por canal.
+
+**No perfil MARKETPLACE**, o canal é lido de `TGFCAB.AD_CANAL_MKTPLACE`:
 
 | Canal | Desconto no rodapé | Ação |
 |---|---|---|
@@ -221,10 +267,23 @@ que guiou o cálculo; divergência reprova.
 | sem faixa e linha existente | `REMOVER` |
 | sem faixa e sem linha | `NENHUMA` |
 
-Os campos do produto são copiados de uma linha de KP real do mesmo SKU num
-outro pedido 1755 sem desconto. Como o KP tem valor fixo por SKU, a cópia é
-exata. O script confere que o gabarito tem o valor esperado da faixa antes de
-copiar.
+Os campos do produto são copiados de uma linha de KP real do mesmo SKU, **na
+mesma TOP do pedido**, sem desconto. Como o KP tem valor fixo por SKU, a cópia
+é exata. O script confere que o gabarito tem o valor esperado da faixa antes
+de copiar.
+
+**O gabarito precisa ser da mesma TOP.** Campos como `RESERVA` e
+`ATUALESTOQUE` são dirigidos pela operação — a `TGFTOP` mostra `ATUALEST = 'R'`
+na 1722 e na 1755, mas `'B'` na 1728. Gabarito de outra TOP dispara:
+
+```
+ORA-20101: Reserva diferente da definição na TOP
+TRG_INC_TGFITE, line 437
+```
+
+Cobertura verificada: 1722, 1728 e 1755 têm as sete faixas de KP em
+quantidade suficiente. Onde faltar, o script recusa e pede um KP manual
+naquela TOP.
 
 **Campos de ciclo de vida não vêm do gabarito.** Ele vem de um pedido já
 faturado, onde `QTDENTREGUE=1`, `PENDENTE='N'` e `STATUSNOTA='L'` são
@@ -237,13 +296,13 @@ e `PENDENTE`/`STATUSNOTA` vêm de um item de produto do próprio pedido.
 | Campo | Valor |
 |---|---|
 | `DTNEG`, `DTMOV` | hoje, meia-noite |
-| `CODCENCUS` | 20000000 |
+| `CODCENCUS` | 20000000 — **só no perfil MARKETPLACE** |
 | `OBSERVACAO` | número único do pedido |
 | `AD_INTERNAOBS` | `NOME - dd/mm` — **preservado se já preenchido** |
 | `VLRDESCTOT`, `PERCDESC` | 0 |
 | `VLRDESCTOTITEM` / `VLRDESCTOTITEMMOE` | soma dos `VLRDESC` dos itens |
 | `QTDVOL` | soma das quantidades, KP fora |
-| `TIPFRETE` | `'N'` (Extra nota) quando frete = 0 |
+| `TIPFRETE` | `'N'` (Extra nota) quando frete = 0 — **só no MARKETPLACE** |
 
 O `VLRNOTA` **não é gravado** — o motor calcula.
 
@@ -325,14 +384,14 @@ certo.
 
 ## Casos em que o pedido é recusado
 
-- TOP diferente de 1755
+- origem não reconhecida (nem TOP 1755, nem `CODVEND` 12/26)
 - mais de um pedido selecionado
 - pedido sem itens, ou só com linhas de KP
 - item inconsistente (`VLRTOT` fora de `VLRUNIT × QTDNEG`)
 - item com venda reconstruída ≤ 0
 - desconto no rodapé com canal não reconhecido
 - alvo que não fecha com 2 decimais
-- sem gabarito de KP para a faixa necessária
+- sem gabarito de KP para a faixa necessária **na TOP do pedido**
 - `RECALCULAR_IMPOSTOS` ligado e a classe ausente no ambiente
 
 ---
@@ -381,7 +440,14 @@ confirmar com quem conhece o fluxo de faturamento se há outros campos de
 controle além dos tratados.
 
 **Pedido criado manualmente** vem sem `AD_CANAL_MKTPLACE`. Se tiver desconto
-no rodapé, é recusado.
+no rodapé e for do perfil MARKETPLACE, é recusado. No perfil SITE não importa,
+porque o desconto é sempre absorvido.
+
+**Volumes no site.** `volumes: true` no perfil SITE foi decisão assumida — não
+estava no escopo original. Trocar para `false` se não for desejado.
+
+**TOPs de site fora do padrão** (2201, 1107, 1761) são aceitas com aviso. Vale
+decidir se devem ser tratadas ou recusadas.
 
 ---
 
@@ -411,8 +477,10 @@ após novo login. A Observação Interna registra o que estiver em cache.
 
 | Arquivo | Conteúdo |
 |---|---|
-| `Normalizar pedido v6.js` | o script em uso |
-| `Normalizar pedido v5.js` | versão anterior, mantida como referência |
+| `Normalizar pedido v7.js` | o script em uso — marketplace + site |
+| `Normalizar pedido v6.js` | só marketplace, mantida como referência |
+| `Normalizar pedido v5.js` | replicava o motor fiscal, referência histórica |
 | `README.md` | este documento |
 | `Diagnostico.md` | histórico da investigação e caminhos descartados |
+| `REFERENCIA-API-SANKHYA.md` | catálogo da API acessível em botões de ação |
 | `demo.mp4` | demonstração |
