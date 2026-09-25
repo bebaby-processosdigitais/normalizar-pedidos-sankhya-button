@@ -441,6 +441,10 @@ Registrados porque explicam por que o desenho final é conservador.
    Testei quinze nomes de classe em `...comercial.*`, nenhum no subpacote
    `.impostos.`, e com a grafia "Helper" em vez de "Helpper". Toda a
    arquitetura de auto-calibração da v5 existiu por causa disso.
+9. **Tirar o filtro de TOP do gabarito de KP** na v7 — causou o `ORA-20101`.
+   Generalizar sem verificar o que a generalização quebrava.
+10. **`catch` engolindo erro na minha própria sonda** — uma rodada depois de
+    eu identificar esse mesmo defeito no botão do financeiro.
 
 O padrão comum: supor o comportamento do ambiente em vez de sondá-lo. As
 sondas (v1 a v9, todas somente-leitura) foram o que corrigiu isso, e a
@@ -551,7 +555,94 @@ do JAR do modelcore em vez de adivinhar nomes.
 
 ---
 
-## 12. Ressalva final
+## 12. Extensão para pedidos de site (v7)
+
+O botão passou a tratar também os pedidos vindos das duas lojas próprias.
+
+### Identificação
+
+`CODVEND` **12 = SITE ABC** e **26 = SITE KIKKABOO**. É filtro de cabeçalho e
+mais específico que a TOP, então tem prioridade na detecção.
+
+Amostra de agosto e setembro de 2026, 659 pedidos:
+
+| CODVEND | TOP | Centro | Pedidos |
+|---|---|---|---|
+| 26 | 1722 | 16000000 | 175 |
+| 26 | 1728 | 16000000 | 173 |
+| 12 | 1728 | 16000000 | 117 |
+| 12 | 1722 | 16000000 | 116 |
+| 12 | 1722 | 6000000 | 33 |
+| 12 | 1728 | 6000000 | 32 |
+
+Mais caudas menores em 2201, 1107, 1761 e centros 1000000. O `CODTIPVENDA` é
+**347** em todos.
+
+### O que muda em relação ao marketplace
+
+O cálculo de venda, KP, absorção do desconto e arredondamento é **idêntico**.
+Só o cabeçalho difere: o centro de resultado já vem correto e não é alterado,
+o `TIPFRETE` não é tocado, e a Observação Interna tem outro formato.
+
+### Observação Interna — script e operador
+
+O formato real usado pelos operadores é longo:
+
+```
+ABC Design Brasil
+Pedido #611078 05/08/2025
+Translovato Standard
+
+Pix com desconto BRL79,90
+Valor Parcelado
+1x de BRL795,65
+
+Transação ID
+61207955
+
+Total
+BRL795,65
+
+André - 06/08
+```
+
+Transportadora, parcelamento e ID da transação **não estão em campos do
+Sankhya**. O script grava só o que consegue — loja, `#` do
+`AD_PEDIDOMKTPLACE` e assinatura — e o operador completa o resto.
+
+### O desconto do rodapé no site
+
+Sempre absorvido na base, sem regra por canal. Na amostra de teste quase
+nenhum pedido tinha desconto no rodapé, mas isso é viés: a base tem sobretudo
+pedidos já processados pelos operadores.
+
+### `ORA-20101` — o gabarito precisa ser da mesma TOP
+
+Ao generalizar a busca de gabarito de KP para funcionar nos dois perfis, tirei
+o filtro de `CODTIPOPER`. Resultado:
+
+```
+ORA-20101: Reserva diferente da definição na TOP
+TESTE.TRG_INC_TGFITE, line 437
+```
+
+Campos como `RESERVA` e `ATUALESTOQUE` são dirigidos pela operação. A
+`TGFTOP` confirma: `ATUALEST = 'R'` na 1722 (PEDIDO SITE) e na 1755 (PEDIDO
+MARKETPLACE), mas `'B'` na 1728 (NFE DE VENDA - SITE).
+
+Cheguei a construir uma sonda para derivar empiricamente quais campos são
+dirigidos pela TOP e quais pelo produto, comparando linhas reais. **Não foi
+necessária:** a contagem de KP por TOP mostrou que 1722, 1728 e 1755 já têm as
+sete faixas em quantidade folgada. Bastou devolver o filtro, mirando a TOP do
+próprio pedido.
+
+A sonda ainda quebrou por um `catch` engolindo o erro do `findByPK` — o mesmo
+defeito que eu havia acabado de criticar no botão do financeiro, reproduzido
+no meu próprio código.
+
+---
+
+## 13. Ressalva final
 
 A v6 **não replica mais o motor fiscal** — chama o do Sankhya. A ressalva de
 arquitetura que valia para a v5 caiu.
